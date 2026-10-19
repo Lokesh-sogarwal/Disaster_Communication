@@ -27,3 +27,6 @@ local.properties
 .env
 .env.*
 !.env.example
+
+# Kotlin compiler daemon data
+.kotlin/

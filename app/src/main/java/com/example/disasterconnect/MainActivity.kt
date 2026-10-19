@@ -8,9 +8,11 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.widget.Toast
 
@@ -19,7 +21,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -31,7 +32,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 
-import androidx.compose.foundation.shape.RoundedCornerShape
 
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -58,18 +58,66 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 
+import com.example.disasterconnect.ble.BleConnectionManager
 import com.example.disasterconnect.data.AppDatabase
 import com.example.disasterconnect.data.EmergencyMessage
 import com.example.disasterconnect.data.MessagePriority
+import com.example.disasterconnect.data.MessageType
 import com.example.disasterconnect.data.SosPacket
+import com.example.disasterconnect.messaging.MessagingCoordinator
 import com.example.disasterconnect.network.NetworkDecisionEngine
 import com.example.disasterconnect.network.OfflineRelayQueue
 import com.example.disasterconnect.network.NearbyNetworkRepository
 import com.example.disasterconnect.network.NetworkNearbyNode
 import com.example.disasterconnect.network.NearbyNodeState
 import com.example.disasterconnect.ui.theme.DisasterConnectTheme
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import com.example.disasterconnect.data.DeliveryState
+import com.example.disasterconnect.map.LocationMap
+import com.example.disasterconnect.map.MapLoadState
+import com.example.disasterconnect.map.UserLocationLegendDot
+import com.example.disasterconnect.ui.components.CardTone
+import com.example.disasterconnect.ui.components.DisasterCard
+import com.example.disasterconnect.ui.components.EmergencyButton
+import com.example.disasterconnect.ui.components.NoticeCard
+import com.example.disasterconnect.ui.components.PrimaryButton
+import com.example.disasterconnect.ui.components.ScreenHeader
+import com.example.disasterconnect.ui.components.SecondaryButton
+import com.example.disasterconnect.ui.components.StatusBadge
+import com.example.disasterconnect.ui.components.StatusType
+import com.example.disasterconnect.ui.components.TertiaryButton
+import com.example.disasterconnect.ui.theme.Sizes
+import com.example.disasterconnect.ui.theme.Spacing
 
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
@@ -86,7 +134,10 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) { permissions ->
-            if (permissions.values.all { it }) startDashboardDiscovery()
+            // Android returns an empty result when another permission request (location) is
+            // already showing. Treat that as "not yet"; onResume asks again afterwards.
+            // Without this check, empty == "all granted" and the request loops until a crash.
+            if (permissions.isNotEmpty() && permissions.values.all { it }) startDashboardDiscovery()
         }
 
     // =========================================================
@@ -207,6 +258,13 @@ class MainActivity : ComponentActivity() {
 
             val nearbyNodes by NearbyNetworkRepository.nodes.collectAsState()
 
+            val nearbyScanning by NearbyNetworkRepository.isScanning.collectAsState()
+
+            // Read-only view of the existing message table, used for the "waiting to send" count.
+            val storedMessages by remember {
+                database.emergencyMessageDao().observeAll()
+            }.collectAsState(initial = emptyList())
+
             val coroutineScope =
                 rememberCoroutineScope()
 
@@ -220,113 +278,121 @@ class MainActivity : ComponentActivity() {
                             .background
                 ) {
 
-                    if (permissionGranted) {
+                    // The dashboard is always shown so SOS is never hidden behind a permission screen.
+                    DisasterConnectHome(
 
-                        DisasterConnectHome(
+                        locationState = currentLocationState(),
 
-                            latitude = latitude,
+                        latitude = latitude,
 
-                            longitude = longitude,
+                        longitude = longitude,
 
-                            accuracy = accuracy,
+                        accuracy = accuracy,
 
-                            locationMessage =
-                                locationMessage,
+                        internetAvailable =
+                            internetAvailable,
 
-                            internetAvailable =
-                                internetAvailable,
+                        networkType =
+                            networkType,
 
-                            networkType =
-                                networkType,
+                        nearbyNodes = nearbyNodes.values.toList(),
 
-                            nearbyNodes = nearbyNodes.values.toList(),
+                        nearbyScanning = nearbyScanning,
 
-                            onRefreshLocation = {
+                        messagesWaiting = storedMessages.count { it.isWaitingToSend() },
 
-                                getCurrentLocation()
+                        onRefreshLocation = {
 
-                                updateNetworkStatus()
-                            },
+                            getCurrentLocation()
 
-                            onOpenMap = {
+                            updateNetworkStatus()
+                        },
 
-                                val intent =
-                                    Intent(
-                                        this@MainActivity,
-                                        MapActivity::class.java
-                                    )
+                        onAllowLocation = {
 
-                                latitude?.let {
+                            requestLocationPermission()
+                        },
 
-                                    intent.putExtra(
-                                        "latitude",
-                                        it
-                                    )
-                                }
+                        onOpenSettings = {
 
-                                longitude?.let {
+                            openAppSettings()
+                        },
 
-                                    intent.putExtra(
-                                        "longitude",
-                                        it
-                                    )
-                                }
+                        onOpenMap = {
 
-                                startActivity(intent)
-                            },
-
-                            onOpenNearbyDevices = {
-
-                                startActivity(
-                                    Intent(
-                                        this@MainActivity,
-                                        NearbyDevicesActivity::class.java
-                                    )
+                            val intent =
+                                Intent(
+                                    this@MainActivity,
+                                    MapActivity::class.java
                                 )
+
+                            latitude?.let {
+
+                                intent.putExtra(
+                                    "latitude",
+                                    it
+                                )
+                            }
+
+                            longitude?.let {
+
+                                intent.putExtra(
+                                    "longitude",
+                                    it
+                                )
+                            }
+
+                            startActivity(intent)
+                        },
+
+                        onOpenNearbyDevices = {
+
+                            startActivity(
+                                Intent(
+                                    this@MainActivity,
+                                    NearbyDevicesActivity::class.java
+                                )
+                            )
+                        },
+
+                        onOpenMessages = {
+
+                            startActivity(
+                                ChatActivity.intent(
+                                    this@MainActivity,
+                                    peerNodeId = null
+                                )
+                            )
+                        },
+
+                        onSendSos = {
+
+                            showSosDialog = true
+                        }
+                    )
+
+
+                    // =================================================
+                    // SOS DIALOG
+                    // =================================================
+
+                    if (showSosDialog) {
+
+                        SosConfirmationDialog(
+
+                            onConfirm = { message ->
+
+                                showSosDialog = false
+
+                                coroutineScope.launch {
+
+                                    triggerSos(message)
+                                }
                             },
 
-                            onSendSos = {
+                            onDismiss = {
 
-                                showSosDialog = true
-                            }
-                        )
-
-
-                        // =================================================
-                        // SOS DIALOG
-                        // =================================================
-
-                        if (showSosDialog) {
-
-                            SosConfirmationDialog(
-
-                                onConfirm = { message ->
-
-                                    showSosDialog = false
-
-                                    coroutineScope.launch {
-
-                                        triggerSos(message)
-                                    }
-                                },
-
-                                onDismiss = {
-
-                                    showSosDialog = false
-                                }
-                            )
-                        }
-
-                    } else {
-
-                        PermissionScreen(
-
-                            permissionDenied =
-                                permissionDenied,
-
-                            onRequestPermission = {
-
-                                requestLocationPermission()
+                                showSosDialog = false
                             }
                         )
                     }
@@ -358,6 +424,15 @@ class MainActivity : ComponentActivity() {
 
         super.onResume()
 
+        // Picks up a permission granted from system Settings while the app was in the background.
+        permissionGranted =
+            hasLocationPermission()
+
+        if (permissionGranted) {
+
+            permissionDenied = false
+        }
+
         updateNetworkStatus()
 
         startDashboardDiscovery()
@@ -377,19 +452,23 @@ class MainActivity : ComponentActivity() {
 
     private fun startDashboardDiscovery() {
 
+        val bluetoothPermissions = arrayOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE
+        )
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED
+            bluetoothPermissions.any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         ) {
-            nearbyDiscoveryPermissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.BLUETOOTH_SCAN,
-                    Manifest.permission.BLUETOOTH_CONNECT
-                )
-            )
+            nearbyDiscoveryPermissionLauncher.launch(bluetoothPermissions)
             return
         }
 
         NearbyNetworkRepository.start(this, "main-dashboard")
+
+        // Keeps this phone discoverable and delivering queued messages from the dashboard too.
+        MessagingCoordinator.start(this)
     }
 
 
@@ -571,6 +650,44 @@ class MainActivity : ComponentActivity() {
                 Manifest.permission.READ_PHONE_STATE
             )
         )
+    }
+
+
+    private fun openAppSettings() {
+
+        startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", packageName, null)
+            )
+        )
+    }
+
+
+    // ---------------------------------------------------------
+    // Home location state (derived only; location logic unchanged)
+    // ---------------------------------------------------------
+
+    private fun currentLocationState(): HomeLocationState {
+
+        return when {
+
+            permissionGranted && latitude != null && longitude != null ->
+                HomeLocationState.AVAILABLE
+
+            permissionDenied ->
+                HomeLocationState.PERMISSION_DENIED
+
+            !permissionGranted ->
+                HomeLocationState.WAITING_FOR_PERMISSION
+
+            // Same text getCurrentLocation() shows while a request is running.
+            locationMessage == "Getting your location..." ->
+                HomeLocationState.LOCATING
+
+            else ->
+                HomeLocationState.UNAVAILABLE
+        }
     }
 
 
@@ -1152,29 +1269,12 @@ class MainActivity : ComponentActivity() {
     // PERSISTENT NODE ID
     // =========================================================
 
+    // Same identity the phone advertises over BLE, so relays can attribute messages.
     private fun getOrCreateNodeId(): String {
 
-        val preferences =
-            getSharedPreferences(
-                "disaster_connect_preferences",
-                MODE_PRIVATE
-            )
-
-        return preferences.getString(
-            "node_id",
-            null
-        ) ?: UUID.randomUUID()
-            .toString()
-            .also { nodeId ->
-
-                preferences
-                    .edit()
-                    .putString(
-                        "node_id",
-                        nodeId
-                    )
-                    .apply()
-            }
+        return BleConnectionManager.nodeId(
+            this
+        )
     }
 
 
@@ -1303,133 +1403,24 @@ fun SosConfirmationDialog(
 
 
 // =================================================================
-// PERMISSION SCREEN
+// HOME DASHBOARD
 // =================================================================
+// Answers three questions, top to bottom: Where am I? (map) How do I get help?
+// (Emergency Actions) Where is the nearest shelter? (Nearby Shelters).
+// Only real data is shown; missing data gets an honest message.
 
-@Composable
-fun PermissionScreen(
-
-    permissionDenied: Boolean,
-
-    onRequestPermission: () -> Unit
-
-) {
-
-    Column(
-
-        modifier =
-            Modifier
-                .fillMaxSize()
-                .padding(30.dp),
-
-        horizontalAlignment =
-            Alignment.CenterHorizontally,
-
-        verticalArrangement =
-            Arrangement.Center
-
-    ) {
-
-        Text(
-            text = "📍",
-            fontSize = 60.sp
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(20.dp)
-        )
-
-
-        Text(
-
-            text =
-                "Location Permission Required",
-
-            fontSize =
-                24.sp,
-
-            fontWeight =
-                FontWeight.Bold,
-
-            textAlign =
-                TextAlign.Center
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(16.dp)
-        )
-
-
-        Text(
-
-            text =
-                "DisasterConnect needs your location and phone state " +
-                        "for emergency communication, nearby shelters and SOS services.",
-
-            fontSize =
-                16.sp,
-
-            textAlign =
-                TextAlign.Center,
-
-            color =
-                MaterialTheme
-                    .colorScheme
-                    .onSurfaceVariant
-        )
-
-
-        if (permissionDenied) {
-
-            Spacer(
-                modifier =
-                    Modifier.height(10.dp)
-            )
-
-
-            Text(
-
-                text =
-                    "Permission denied. Please enable permissions in settings.",
-
-                color =
-                    Color.Red,
-
-                fontSize =
-                    14.sp
-            )
-        }
-
-
-        Spacer(
-            modifier =
-                Modifier.height(30.dp)
-        )
-
-
-        Button(
-            onClick =
-                onRequestPermission
-        ) {
-
-            Text(
-                "ALLOW PERMISSIONS"
-            )
-        }
-    }
+enum class HomeLocationState {
+    WAITING_FOR_PERMISSION,
+    PERMISSION_DENIED,
+    LOCATING,
+    AVAILABLE,
+    UNAVAILABLE
 }
-
-
-// =================================================================
-// MAIN HOME SCREEN
-// =================================================================
 
 @Composable
 fun DisasterConnectHome(
+
+    locationState: HomeLocationState,
 
     latitude: Double?,
 
@@ -1437,444 +1428,52 @@ fun DisasterConnectHome(
 
     accuracy: Float?,
 
-    locationMessage: String,
-
     internetAvailable: Boolean,
 
     networkType: String,
 
     nearbyNodes: List<NetworkNearbyNode>,
 
+    nearbyScanning: Boolean,
+
+    messagesWaiting: Int,
+
     onRefreshLocation: () -> Unit,
+
+    onAllowLocation: () -> Unit,
+
+    onOpenSettings: () -> Unit,
 
     onOpenMap: () -> Unit,
 
     onOpenNearbyDevices: () -> Unit,
 
-    onSendSos: () -> Unit
+    onOpenMessages: () -> Unit,
 
+    onSendSos: () -> Unit
 ) {
 
     Column(
-
         modifier =
             Modifier
                 .fillMaxSize()
+                .safeDrawingPadding()
                 .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-
-        horizontalAlignment =
-            Alignment.CenterHorizontally
-
+                .padding(
+                    horizontal = Spacing.screen,
+                    vertical = Spacing.lg
+                ),
+        verticalArrangement =
+            Arrangement.spacedBy(Spacing.xl)
     ) {
 
         // =====================================================
-        // TITLE
+        // HEADER
         // =====================================================
 
-        Text(
-
-            text =
-                "DISASTER CONNECT",
-
-            fontSize =
-                26.sp,
-
-            fontWeight =
-                FontWeight.Bold,
-
-            textAlign =
-                TextAlign.Center
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(8.dp)
-        )
-
-
-        Text(
-
-            text =
-                "Emergency Communication Network",
-
-            fontSize =
-                14.sp,
-
-            color =
-                MaterialTheme
-                    .colorScheme
-                    .onSurfaceVariant
-        )
-
-
-        Spacer(
-            modifier =
-                Modifier.height(24.dp)
-        )
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "NEARBY DISASTER NODES",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                nearbyNodes.sortedByDescending { it.rssi }.take(4).forEach { node ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("● ${node.nodeId}")
-                        Text(
-                            text = node.state.dashboardLabel(),
-                            color = node.state.dashboardColor(),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-                if (nearbyNodes.isEmpty()) {
-                    Text("No nearby DisasterConnect nodes detected.")
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Nearby Nodes: ${nearbyNodes.size}")
-                Text("Connected Nodes: ${nearbyNodes.count { it.state == NearbyNodeState.CONNECTED }}")
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-
-        // =====================================================
-        // NETWORK STATUS
-        // =====================================================
-
-        Card(
-
-            modifier =
-                Modifier.fillMaxWidth(),
-
-            shape =
-                RoundedCornerShape(16.dp),
-
-            elevation =
-                CardDefaults.cardElevation(
-                    defaultElevation = 4.dp
-                )
-
-        ) {
-
-            Column(
-
-                modifier =
-                    Modifier.padding(18.dp)
-
-            ) {
-
-                Text(
-
-                    text =
-                        "NETWORK STATUS",
-
-                    fontSize =
-                        14.sp,
-
-                    fontWeight =
-                        FontWeight.Bold
-                )
-
-
-                Spacer(
-                    modifier =
-                        Modifier.height(12.dp)
-                )
-
-
-                Row(
-
-                    modifier =
-                        Modifier.fillMaxWidth(),
-
-                    horizontalArrangement =
-                        Arrangement.SpaceBetween
-
-                ) {
-
-                    Text(
-                        "Internet"
-                    )
-
-
-                    Text(
-
-                        text =
-
-                            if (internetAvailable)
-                                "ONLINE"
-                            else
-                                "OFFLINE",
-
-                        fontWeight =
-                            FontWeight.Bold,
-
-                        color =
-
-                            if (internetAvailable)
-                                Color(0xFF2E7D32)
-                            else
-                                Color.Red
-                    )
-                }
-
-
-                Spacer(
-                    modifier =
-                        Modifier.height(8.dp)
-                )
-
-
-                Row(
-
-                    modifier =
-                        Modifier.fillMaxWidth(),
-
-                    horizontalArrangement =
-                        Arrangement.SpaceBetween
-
-                ) {
-
-                    Text(
-                        "Network"
-                    )
-
-
-                    Text(
-
-                        text =
-                            networkType,
-
-                        fontWeight =
-                            FontWeight.Bold
-                    )
-                }
-
-
-                Spacer(
-                    modifier =
-                        Modifier.height(8.dp)
-                )
-
-
-                Row(
-
-                    modifier =
-                        Modifier.fillMaxWidth(),
-
-                    horizontalArrangement =
-                        Arrangement.SpaceBetween
-
-                ) {
-
-                    Text(
-                        "Nearby Devices"
-                    )
-
-
-                    Text(
-
-                        text =
-                            "0",
-
-                        fontWeight =
-                            FontWeight.Bold
-                    )
-                }
-            }
-        }
-
-
-        Spacer(
-            modifier =
-                Modifier.height(16.dp)
-        )
-
-
-        // =====================================================
-        // LOCATION
-        // =====================================================
-
-        Card(
-
-            modifier =
-                Modifier.fillMaxWidth(),
-
-            shape =
-                RoundedCornerShape(16.dp),
-
-            elevation =
-                CardDefaults.cardElevation(
-                    defaultElevation = 4.dp
-                )
-
-        ) {
-
-            Column(
-
-                modifier =
-                    Modifier.padding(18.dp)
-
-            ) {
-
-                Text(
-
-                    text =
-                        "📍 LOCATION",
-
-                    fontSize =
-                        17.sp,
-
-                    fontWeight =
-                        FontWeight.Bold
-                )
-
-
-                Spacer(
-                    modifier =
-                        Modifier.height(10.dp)
-                )
-
-
-                if (
-                    latitude != null &&
-                    longitude != null
-                ) {
-
-                    Text(
-
-                        text =
-                            "Latitude: %.6f"
-                                .format(latitude)
-                    )
-
-
-                    Text(
-
-                        text =
-                            "Longitude: %.6f"
-                                .format(longitude)
-                    )
-
-
-                    if (accuracy != null) {
-
-                        Text(
-
-                            text =
-                                "Accuracy: %.1f meters"
-                                    .format(accuracy)
-                        )
-                    }
-
-
-                    Spacer(
-                        modifier =
-                            Modifier.height(8.dp)
-                    )
-
-
-                    Text(
-                        locationMessage
-                    )
-
-                } else {
-
-                    Text(
-                        locationMessage
-                    )
-                }
-
-
-                Spacer(
-                    modifier =
-                        Modifier.height(12.dp)
-                )
-
-
-                Button(
-
-                    onClick =
-                        onRefreshLocation,
-
-                    modifier =
-                        Modifier.fillMaxWidth()
-
-                ) {
-
-                    Text(
-                        "REFRESH LOCATION"
-                    )
-                }
-            }
-        }
-
-
-        Spacer(
-            modifier =
-                Modifier.height(24.dp)
-        )
-
-
-        // =====================================================
-        // SOS
-        // =====================================================
-
-        Button(
-
-            onClick =
-                onSendSos,
-
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .height(64.dp),
-
-            shape =
-                RoundedCornerShape(16.dp),
-
-            colors =
-                ButtonDefaults.buttonColors(
-                    containerColor =
-                        Color.Red
-                )
-
-        ) {
-
-            Text(
-
-                text =
-                    "🚨  SEND SOS",
-
-                fontSize =
-                    20.sp,
-
-                fontWeight =
-                    FontWeight.Bold,
-
-                color =
-                    Color.White
-            )
-        }
-
-
-        Spacer(
-            modifier =
-                Modifier.height(12.dp)
+        ScreenHeader(
+            title = "DisasterConnect",
+            subtitle = locationState.headerLabel()
         )
 
 
@@ -1882,108 +1481,756 @@ fun DisasterConnectHome(
         // MAP
         // =====================================================
 
-        Button(
-
-            onClick =
-                onOpenMap,
-
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .height(64.dp),
-
-            shape =
-                RoundedCornerShape(16.dp)
-
-        ) {
-
-            Text(
-
-                text =
-                    "🗺️  VIEW MAP",
-
-                fontSize =
-                    20.sp,
-
-                fontWeight =
-                    FontWeight.Bold
-            )
-        }
-
-
-        Spacer(
-            modifier =
-                Modifier.height(20.dp)
+        HomeMapCard(
+            locationState = locationState,
+            latitude = latitude,
+            longitude = longitude,
+            accuracy = accuracy,
+            internetAvailable = internetAvailable,
+            onRefreshLocation = onRefreshLocation,
+            onAllowLocation = onAllowLocation,
+            onOpenSettings = onOpenSettings
         )
 
 
         // =====================================================
-        // MENU
+        // EMERGENCY ACTIONS
         // =====================================================
 
-        Text(
-            "Messages",
-            fontSize = 17.sp
+        EmergencyActionsSection(
+            locationState = locationState,
+            messagesWaiting = messagesWaiting,
+            onSendSos = onSendSos,
+            onOpenNearbyDevices = onOpenNearbyDevices,
+            onOpenMessages = onOpenMessages,
+            onOpenMap = onOpenMap
         )
 
-        Spacer(
-            modifier =
-                Modifier.height(10.dp)
-        )
 
-        Text(
-            text = "Nearby Devices",
-            fontSize = 17.sp,
-            color = MaterialTheme.colorScheme.primary,
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .clickable(
-                        onClick = onOpenNearbyDevices
-                    )
-        )
+        // =====================================================
+        // NEARBY SHELTERS
+        // =====================================================
 
-        Spacer(
-            modifier =
-                Modifier.height(10.dp)
-        )
+        NearbySheltersSection()
 
-        Text(
-            "Shelters",
-            fontSize = 17.sp
-        )
 
-        Spacer(
-            modifier =
-                Modifier.height(10.dp)
-        )
+        // =====================================================
+        // CONNECTION STATUS
+        // =====================================================
 
-        Text(
-            "Network Status",
-            fontSize = 17.sp
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(10.dp)
-        )
-
-        Text(
-            "Settings",
-            fontSize = 17.sp
+        ConnectionStatusSection(
+            internetAvailable = internetAvailable,
+            networkType = networkType,
+            nearbyNodes = nearbyNodes,
+            nearbyScanning = nearbyScanning,
+            messagesWaiting = messagesWaiting
         )
     }
 }
 
-private fun NearbyNodeState.dashboardLabel(): String = when (this) {
-    NearbyNodeState.NEARBY -> "NEARBY"
-    NearbyNodeState.CONNECTING -> "CONNECTING"
-    NearbyNodeState.CONNECTED -> "CONNECTED"
-    NearbyNodeState.LOST -> "OUT OF RANGE"
+
+// =================================================================
+// MAP CARD
+// =================================================================
+
+@Composable
+private fun HomeMapCard(
+
+    locationState: HomeLocationState,
+
+    latitude: Double?,
+
+    longitude: Double?,
+
+    accuracy: Float?,
+
+    internetAvailable: Boolean,
+
+    onRefreshLocation: () -> Unit,
+
+    onAllowLocation: () -> Unit,
+
+    onOpenSettings: () -> Unit
+) {
+
+    // Large enough to be useful, small enough to keep SOS near the first screen.
+    val windowHeight =
+        with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() }
+
+    val mapHeight =
+        (windowHeight * 0.32f).coerceIn(200.dp, 320.dp)
+
+    var mapLoadState by remember { mutableStateOf(MapLoadState.LOADING) }
+
+    var recenterRequest by remember { mutableIntStateOf(0) }
+
+    var reloadRequest by remember { mutableIntStateOf(0) }
+
+    val showMap =
+        locationState == HomeLocationState.AVAILABLE &&
+                latitude != null &&
+                longitude != null
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors =
+            CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface
+            ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = BorderStroke(Sizes.border, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+
+        if (showMap) {
+
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .height(mapHeight)
+                        .clip(MaterialTheme.shapes.large)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+
+                LocationMap(
+                    latitude = latitude!!,
+                    longitude = longitude!!,
+                    recenterRequest = recenterRequest,
+                    reloadRequest = reloadRequest,
+                    onLoadStateChange = { mapLoadState = it },
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                when (mapLoadState) {
+
+                    MapLoadState.LOADING ->
+                        MapMessagePanel(
+                            title = "Loading map…",
+                            message = "The map needs Internet the first time an area is shown.",
+                            loading = true,
+                            scrollable = true,
+                            modifier = Modifier.fillMaxSize()
+                        )
+
+                    MapLoadState.FAILED ->
+                        MapMessagePanel(
+                            title = "The map couldn't load",
+                            message = "Your location is still known. Check your connection and try again.",
+                            scrollable = true,
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            PrimaryButton(
+                                text = "Try again",
+                                onClick = { reloadRequest++ },
+                                icon = Icons.Filled.Refresh
+                            )
+                        }
+
+                    MapLoadState.READY ->
+                        PrimaryButton(
+                            text = "Recenter",
+                            onClick = { recenterRequest++ },
+                            icon = Icons.Filled.LocationOn,
+                            modifier =
+                                Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(Spacing.md)
+                        )
+                }
+            }
+
+        } else {
+
+            LocationStatePanel(
+                locationState = locationState,
+                onAllowLocation = onAllowLocation,
+                onOpenSettings = onOpenSettings,
+                onRefreshLocation = onRefreshLocation,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = mapHeight)
+            )
+        }
+
+
+        // ---------------------------------------------------------
+        // Legend, coordinates and offline note
+        // ---------------------------------------------------------
+
+        if (showMap) {
+
+            Column(
+                modifier = Modifier.padding(Spacing.lg),
+                verticalArrangement = Arrangement.spacedBy(Spacing.sm)
+            ) {
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+
+                    UserLocationLegendDot()
+
+                    Spacer(modifier = Modifier.width(Spacing.sm))
+
+                    Text(
+                        text = "My location",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                }
+
+                Text(
+                    text =
+                        "%.5f, %.5f".format(latitude, longitude) +
+                                (accuracy?.let { " • accurate to about %.0f m".format(it) } ?: ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (!internetAvailable) {
+
+                    StatusBadge(
+                        status = StatusType.WARNING,
+                        label = "Offline: map may only show areas viewed before"
+                    )
+                }
+
+                TertiaryButton(
+                    text = "Refresh location",
+                    onClick = onRefreshLocation,
+                    icon = Icons.Filled.Refresh
+                )
+            }
+        }
+    }
 }
 
-private fun NearbyNodeState.dashboardColor(): Color = when (this) {
-    NearbyNodeState.CONNECTED, NearbyNodeState.NEARBY -> Color(0xFF2E7D32)
-    NearbyNodeState.CONNECTING -> Color(0xFFF57C00)
-    NearbyNodeState.LOST -> Color.Red
+
+@Composable
+private fun LocationStatePanel(
+
+    locationState: HomeLocationState,
+
+    onAllowLocation: () -> Unit,
+
+    onOpenSettings: () -> Unit,
+
+    onRefreshLocation: () -> Unit,
+
+    modifier: Modifier = Modifier
+) {
+
+    when (locationState) {
+
+        HomeLocationState.WAITING_FOR_PERMISSION ->
+            MapMessagePanel(
+                title = "Waiting for permission",
+                message = "Choose Allow when your phone asks to use your location.",
+                loading = true,
+                modifier = modifier
+            ) {
+                PrimaryButton(
+                    text = "Allow location",
+                    onClick = onAllowLocation,
+                    icon = Icons.Filled.LocationOn
+                )
+            }
+
+        HomeLocationState.PERMISSION_DENIED ->
+            MapMessagePanel(
+                title = "Location access is off",
+                message =
+                    "Allow location so the map can show where you are. " +
+                            "Sending an SOS also needs location access.",
+                icon = Icons.Filled.LocationOn,
+                modifier = modifier
+            ) {
+                PrimaryButton(
+                    text = "Allow location",
+                    onClick = onAllowLocation,
+                    icon = Icons.Filled.LocationOn
+                )
+
+                SecondaryButton(
+                    text = "Open settings",
+                    onClick = onOpenSettings,
+                    icon = Icons.Filled.Settings
+                )
+            }
+
+        HomeLocationState.LOCATING ->
+            MapMessagePanel(
+                title = "Finding your location…",
+                message = "This can take a minute. Being outdoors or near a window helps.",
+                loading = true,
+                modifier = modifier
+            )
+
+        HomeLocationState.UNAVAILABLE,
+        HomeLocationState.AVAILABLE ->
+            MapMessagePanel(
+                title = "Can't find your location",
+                message = "Check that Location is switched on in your phone settings, then try again.",
+                icon = Icons.Outlined.Warning,
+                modifier = modifier
+            ) {
+                PrimaryButton(
+                    text = "Try again",
+                    onClick = onRefreshLocation,
+                    icon = Icons.Filled.Refresh
+                )
+            }
+    }
 }
+
+
+/** Solid panel used for every map state that is not the map itself. */
+@Composable
+private fun MapMessagePanel(
+
+    title: String,
+
+    message: String,
+
+    modifier: Modifier = Modifier,
+
+    loading: Boolean = false,
+
+    icon: ImageVector? = null,
+
+    // Only for panels with a fixed height (over the map). Inside the scrolling Home
+    // page an unbounded scrollable panel crashes Compose, so it grows instead.
+    scrollable: Boolean = false,
+
+    actions: @Composable ColumnScope.() -> Unit = {}
+) {
+
+    Column(
+        modifier =
+            modifier
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .then(
+                    if (scrollable) Modifier.verticalScroll(rememberScrollState())
+                    else Modifier
+                )
+                .padding(Spacing.xl)
+                .semantics(mergeDescendants = true) {},
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement =
+            Arrangement.spacedBy(
+                Spacing.md,
+                Alignment.CenterVertically
+            )
+    ) {
+
+        if (loading) {
+
+            CircularProgressIndicator(
+                color = MaterialTheme.colorScheme.primary
+            )
+
+        } else if (icon != null) {
+
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(Sizes.icon + Spacing.sm)
+            )
+        }
+
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center
+        )
+
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+
+        actions()
+    }
+}
+
+
+// =================================================================
+// EMERGENCY ACTIONS
+// =================================================================
+
+private class HomeAction(
+    val label: String,
+    val description: String,
+    val icon: ImageVector,
+    val onClick: () -> Unit,
+    val enabled: Boolean = true
+)
+
+@Composable
+private fun EmergencyActionsSection(
+
+    locationState: HomeLocationState,
+
+    messagesWaiting: Int,
+
+    onSendSos: () -> Unit,
+
+    onOpenNearbyDevices: () -> Unit,
+
+    onOpenMessages: () -> Unit,
+
+    onOpenMap: () -> Unit
+) {
+
+    val locationKnown =
+        locationState == HomeLocationState.AVAILABLE
+
+    val actions =
+        listOf(
+            HomeAction(
+                label = "Nearby Devices",
+                description = "Find phones close to you",
+                icon = Icons.Filled.Phone,
+                onClick = onOpenNearbyDevices
+            ),
+            HomeAction(
+                label = "Messages",
+                description =
+                    if (messagesWaiting > 0) "$messagesWaiting waiting to send"
+                    else "Read and send messages",
+                icon = Icons.Filled.Email,
+                onClick = onOpenMessages
+            ),
+            HomeAction(
+                label = "Full map",
+                description =
+                    if (locationKnown) "Open a larger map"
+                    else "Available once your location is found",
+                icon = Icons.Filled.Place,
+                onClick = onOpenMap,
+                // The full map needs a real position to centre on.
+                enabled = locationKnown
+            )
+        )
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
+    ) {
+
+        SectionTitle("Emergency Actions")
+
+        EmergencyButton(
+            text = "Send SOS",
+            onClick = onSendSos,
+            icon = Icons.Filled.Warning,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        if (
+            locationState == HomeLocationState.WAITING_FOR_PERMISSION ||
+            locationState == HomeLocationState.PERMISSION_DENIED
+        ) {
+
+            Text(
+                text = "SOS needs location access. Allow location in the map section above.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // Two columns on normal phones; one column on narrow screens or with large text.
+        BoxWithConstraints {
+
+            val columns =
+                if (maxWidth >= 340.dp && LocalDensity.current.fontScale <= 1.3f) 2 else 1
+
+            Column(
+                verticalArrangement = Arrangement.spacedBy(Spacing.md)
+            ) {
+
+                actions.chunked(columns).forEach { row ->
+
+                    Row(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .height(IntrinsicSize.Min),
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+                    ) {
+
+                        row.forEach { action ->
+
+                            HomeActionTile(
+                                action = action,
+                                modifier =
+                                    Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                            )
+                        }
+
+                        repeat(columns - row.size) {
+
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun HomeActionTile(
+
+    action: HomeAction,
+
+    modifier: Modifier = Modifier
+) {
+
+    DisasterCard(
+        modifier = modifier,
+        onClick = action.onClick,
+        enabled = action.enabled
+    ) {
+
+        Icon(
+            imageVector = action.icon,
+            contentDescription = null,
+            modifier = Modifier.size(Sizes.icon)
+        )
+
+        Spacer(modifier = Modifier.height(Spacing.sm))
+
+        Text(
+            text = action.label,
+            style = MaterialTheme.typography.titleSmall
+        )
+
+        Text(
+            text = action.description,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+
+// =================================================================
+// NEARBY SHELTERS
+// =================================================================
+
+@Composable
+private fun NearbySheltersSection() {
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
+    ) {
+
+        SectionTitle("Nearby Shelters")
+
+        // The app has no real shelter data yet. Never show made-up shelters here.
+        NoticeCard(
+            title = "No shelter information yet",
+            message =
+                "DisasterConnect does not have shelter locations for your area, " +
+                        "so it can't show the nearest shelter. " +
+                        "Follow instructions from local authorities.",
+            tone = CardTone.INFO
+        )
+    }
+}
+
+
+// =================================================================
+// CONNECTION STATUS
+// =================================================================
+
+@Composable
+private fun ConnectionStatusSection(
+
+    internetAvailable: Boolean,
+
+    networkType: String,
+
+    nearbyNodes: List<NetworkNearbyNode>,
+
+    nearbyScanning: Boolean,
+
+    messagesWaiting: Int
+) {
+
+    val visibleNodes =
+        nearbyNodes.filter { it.state != NearbyNodeState.LOST }
+
+    val connectedNodes =
+        nearbyNodes.count { it.state == NearbyNodeState.CONNECTED }
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
+    ) {
+
+        SectionTitle("Connection Status")
+
+        DisasterCard {
+
+            Column(
+                verticalArrangement = Arrangement.spacedBy(Spacing.lg)
+            ) {
+
+                StatusRow(
+                    label = "Internet",
+                    detail =
+                        if (internetAvailable) "Connected through $networkType"
+                        else "No internet. Nearby phones can still pass on messages.",
+                    status =
+                        if (internetAvailable) StatusType.CONNECTED else StatusType.DISCONNECTED,
+                    statusLabel =
+                        if (internetAvailable) "Online" else "Offline"
+                )
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                StatusRow(
+                    label = "Nearby phones",
+                    detail =
+                        when {
+                            visibleNodes.isNotEmpty() -> "${visibleNodes.size} found nearby"
+                            nearbyScanning -> "Searching… none found yet"
+                            else -> "Search is off. Open Nearby Devices to start it."
+                        },
+                    status =
+                        if (connectedNodes > 0) StatusType.CONNECTED else StatusType.DISCONNECTED,
+                    statusLabel =
+                        if (connectedNodes > 0) "$connectedNodes connected" else "Not connected"
+                )
+
+                nearbyNodes
+                    .sortedByDescending { it.rssi }
+                    .take(4)
+                    .forEach { node ->
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+
+                            Text(
+                                text = node.nodeId,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+
+                            Text(
+                                text = node.state.dashboardLabel(),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                StatusRow(
+                    label = "Messages",
+                    detail =
+                        if (messagesWaiting > 0) "They send automatically when another phone is in range."
+                        else "Nothing waiting to send",
+                    status =
+                        if (messagesWaiting > 0) StatusType.PENDING else StatusType.DELIVERED,
+                    statusLabel =
+                        if (messagesWaiting > 0) "$messagesWaiting waiting" else "None waiting"
+                )
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun StatusRow(
+
+    label: String,
+
+    detail: String,
+
+    status: StatusType,
+
+    statusLabel: String
+) {
+
+    Column(
+        modifier = Modifier.semantics(mergeDescendants = true) {},
+        verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+    ) {
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f)
+            )
+
+            Spacer(modifier = Modifier.width(Spacing.sm))
+
+            StatusBadge(
+                status = status,
+                label = statusLabel
+            )
+        }
+
+        Text(
+            text = detail,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+
+// =================================================================
+// SHARED HOME HELPERS
+// =================================================================
+
+@Composable
+private fun SectionTitle(
+    text: String
+) {
+
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleLarge,
+        modifier = Modifier.semantics { heading() }
+    )
+}
+
+private fun HomeLocationState.headerLabel(): String = when (this) {
+    HomeLocationState.AVAILABLE -> "Your location is shown on the map"
+    HomeLocationState.LOCATING -> "Finding your location…"
+    HomeLocationState.WAITING_FOR_PERMISSION -> "Waiting for location permission"
+    HomeLocationState.PERMISSION_DENIED -> "Location access is off"
+    HomeLocationState.UNAVAILABLE -> "Location not available right now"
+}
+
+private fun NearbyNodeState.dashboardLabel(): String = when (this) {
+    NearbyNodeState.NEARBY -> "Nearby"
+    NearbyNodeState.CONNECTING -> "Connecting"
+    NearbyNodeState.CONNECTED -> "Connected"
+    NearbyNodeState.LOST -> "Out of range"
+}
+
+// Outgoing messages (including SOS) not yet handed to another phone. Delivery receipts are not messages.
+private fun EmergencyMessage.isWaitingToSend(): Boolean =
+    !isIncoming && messageType != MessageType.RECEIPT && deliveryState in setOf(
+        DeliveryState.CREATED,
+        DeliveryState.QUEUED,
+        DeliveryState.SENT
+    )

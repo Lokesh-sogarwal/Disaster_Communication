@@ -5,9 +5,6 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
-import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
-import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
@@ -37,20 +34,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.clickable
 
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 
-import androidx.compose.foundation.shape.RoundedCornerShape
 
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -59,23 +50,74 @@ import androidx.compose.runtime.setValue
 
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 
 import com.example.disasterconnect.ui.theme.DisasterConnectTheme
-import com.example.disasterconnect.ble.DisasterConnectGattClient
-import com.example.disasterconnect.ble.DisasterConnectGattServer
+import android.net.Uri
+import android.provider.Settings
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.scaleIn
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
+import com.example.disasterconnect.ble.ManagedConnection
+import com.example.disasterconnect.nearby.ConnectionSuccessTracker
+import com.example.disasterconnect.nearby.DeviceStatus
+import com.example.disasterconnect.nearby.deviceStatus
+import com.example.disasterconnect.ui.components.CardTone
+import com.example.disasterconnect.ui.components.DisasterCard
+import com.example.disasterconnect.ui.components.NoticeCard
+import com.example.disasterconnect.ui.components.PrimaryButton
+import com.example.disasterconnect.ui.components.ScreenHeader
+import com.example.disasterconnect.ui.components.SecondaryButton
+import com.example.disasterconnect.ui.components.StatusBadge
+import com.example.disasterconnect.ui.components.StatusType
+import com.example.disasterconnect.ui.theme.DisasterTheme
+import com.example.disasterconnect.ui.theme.Sizes
+import com.example.disasterconnect.ui.theme.Spacing
+import kotlinx.coroutines.delay
+import com.example.disasterconnect.ble.BleAdvertiser
 import com.example.disasterconnect.ble.BleConnectionManager
+import com.example.disasterconnect.messaging.MessagingCoordinator
 import com.example.disasterconnect.ble.GattConnectionEvent
 import com.example.disasterconnect.ble.GattConnectionEventType
 import com.example.disasterconnect.network.NearbyNetworkRepository
 import com.example.disasterconnect.network.NearbyNodeState
 import androidx.compose.runtime.collectAsState
+import androidx.compose.material.icons.filled.Lock
+import com.example.disasterconnect.data.AppDatabase
+import com.example.disasterconnect.security.KeyTrustStatus
+import com.example.disasterconnect.security.keyTrustStatus
+import com.example.disasterconnect.ui.components.TertiaryButton
+import kotlinx.coroutines.flow.MutableStateFlow
 
-import java.security.SecureRandom
 
 
 // =========================================================
@@ -100,8 +142,6 @@ class NearbyDevicesActivity : ComponentActivity() {
 
     private var bluetoothLeScanner: BluetoothLeScanner? = null
 
-    private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
-
     private val mainHandler =
         Handler(Looper.getMainLooper())
 
@@ -110,19 +150,17 @@ class NearbyDevicesActivity : ComponentActivity() {
     // TEMPORARY NODE ID
     // =========================================================
 
-    private val temporaryNodeBytes =
-        ByteArray(TEMPORARY_NODE_ID_BYTES).also {
+    // Lazy: the Activity context is not usable until onCreate.
+    private val temporaryNodeId by lazy {
 
-            SecureRandom().nextBytes(it)
-        }
+        BleConnectionManager.nodeId(this)
+    }
 
-    private val temporaryNodeId =
-        BleConnectionManager.nodeId(
-            this,
-            "DC-${temporaryNodeBytes.toHexId()}"
-        )
+    // Derived from the persisted id so the advertised id matches the GATT id.
+    private val temporaryNodeBytes by lazy {
 
-    private var advertiseRetryAttempted = false
+        BleConnectionManager.nodeIdBytes(temporaryNodeId)
+    }
 
 
     // =========================================================
@@ -144,11 +182,14 @@ class NearbyDevicesActivity : ComponentActivity() {
 
     private var bluetoothStateReceiverRegistered = false
 
-    private var isAdvertising by mutableStateOf(false)
-
     private var bluetoothUnavailable by mutableStateOf(false)
 
     private var bluetoothDisabled by mutableStateOf(false)
+
+    private var bluetoothPermissionMissing by mutableStateOf(false)
+
+    // Why BleConnectionManager.connect() declined a tap, shown on that device's card.
+    private var connectNotice by mutableStateOf<Pair<String, String>?>(null)
 
     private var connectedNodeId by mutableStateOf<String?>(null)
 
@@ -255,47 +296,6 @@ class NearbyDevicesActivity : ComponentActivity() {
     // BLE CALLBACKS
     // =========================================================
 
-    private val advertiseCallback =
-        object : AdvertiseCallback() {
-
-            override fun onStartSuccess(
-                settingsInEffect: AdvertiseSettings
-            ) {
-
-                isAdvertising = true
-
-                if (!isScanning) {
-
-                    statusMessage =
-                        "Advertising as node $temporaryNodeId"
-                }
-            }
-
-            override fun onStartFailure(
-                errorCode: Int
-            ) {
-
-                isAdvertising = false
-
-                if (
-                    errorCode == AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED &&
-                    !advertiseRetryAttempted
-                ) {
-
-                    advertiseRetryAttempted = true
-
-                    startAdvertising(
-                        connectable = true
-                    )
-
-                    return
-                }
-
-                statusMessage =
-                    advertisingErrorMessage(errorCode)
-            }
-        }
-
     private val scanCallback =
         object : ScanCallback() {
 
@@ -357,17 +357,33 @@ class NearbyDevicesActivity : ComponentActivity() {
 
                     val sharedScanning by NearbyNetworkRepository.isScanning.collectAsState()
 
+                    val advertising by BleAdvertiser.isAdvertising.collectAsState()
+
+                    val advertiseError by BleAdvertiser.lastError.collectAsState()
+
+                    val connections by BleConnectionManager.connections.collectAsState()
+
+                    // Personal-contact verification status. Display only; connecting, messaging and SOS ignore it.
+                    val trustedKeys by remember { AppDatabase.getDatabase(this).trustedKeyDao().observeAll() }
+                        .collectAsState(initial = emptyList())
+
+                    val keyExchange by MessagingCoordinator.keyExchange.collectAsState()
+
+                    val keyConflicts by remember(keyExchange) { keyExchange?.conflicts ?: MutableStateFlow(emptySet()) }
+                        .collectAsState()
+
                     NearbyDevicesScreen(
-                        temporaryNodeId = temporaryNodeId,
-                        statusMessage = statusMessage,
+                        localNodeId = temporaryNodeId,
+                        bluetooth =
+                            when {
+                                bluetoothUnavailable -> BluetoothReadiness.UNSUPPORTED
+                                bluetoothPermissionMissing -> BluetoothReadiness.PERMISSION_NEEDED
+                                bluetoothDisabled -> BluetoothReadiness.OFF
+                                else -> BluetoothReadiness.READY
+                            },
                         isScanning = sharedScanning,
-                        isAdvertising = isAdvertising,
-                        bluetoothUnavailable = bluetoothUnavailable,
-                        bluetoothDisabled = bluetoothDisabled,
-                        connectedNodeId = connectedNodeId,
-                        connectionStatus = connectionStatus,
-                        handshakeSuccessful = handshakeSuccessful,
-                        discoveryClockMillis = discoveryClockMillis,
+                        isAdvertising = advertising,
+                        advertisingProblem = advertiseError?.let(::advertisingErrorMessage),
                         nodes = sharedNodes.values.map { node ->
                             NearbyNode(
                                 temporaryId = node.nodeId,
@@ -380,10 +396,32 @@ class NearbyDevicesActivity : ComponentActivity() {
                         }.sortedByDescending {
                             it.rssi
                         },
-                        onToggleScanning = ::toggleScanning,
+                        connections = connections,
+                        outgoingLinkNodeId = BleConnectionManager.outgoingLinkNodeId,
+                        connectNotice = connectNotice,
+                        onStartScanning = {
+                            scanningRequested = true
+                            prepareDiscovery()
+                        },
+                        onStopScanning = {
+                            scanningRequested = false
+                            stopScanning("Nearby-device scanning stopped by user.")
+                        },
+                        onRequestPermission = ::prepareDiscovery,
+                        onOpenSettings = ::openAppSettings,
                         onEnableBluetooth = ::requestBluetoothEnable,
                         onConnect = ::connectToNode,
-                        onBack = ::finish
+                        onDisconnect = { node ->
+                            BleConnectionManager.disconnect(node.temporaryId)
+                        },
+                        onMessage = { node ->
+                            startActivity(ChatActivity.intent(this, node.temporaryId))
+                        },
+                        onBack = ::finish,
+                        keyTrust = { nodeId -> keyTrustStatus(nodeId, trustedKeys, keyConflicts) },
+                        onVerify = { node ->
+                            startActivity(VerificationActivity.intent(this, node.temporaryId))
+                        }
                     )
                 }
             }
@@ -405,8 +443,6 @@ class NearbyDevicesActivity : ComponentActivity() {
 
         stopScanning("Nearby-device scanning paused while this screen is inactive.")
 
-        stopAdvertising()
-
         super.onPause()
     }
 
@@ -417,8 +453,6 @@ class NearbyDevicesActivity : ComponentActivity() {
         unregisterBluetoothStateReceiver()
 
         stopScanning("Nearby-device scanning stopped.")
-
-        stopAdvertising()
 
         super.onDestroy()
     }
@@ -450,6 +484,10 @@ class NearbyDevicesActivity : ComponentActivity() {
 
         bluetoothUnavailable = false
 
+        bluetoothPermissionMissing =
+            !hasBluetoothPermissions() ||
+                    (requiresLocationPermission() && !hasLocationPermission())
+
         if (!hasBluetoothPermissions()) {
 
             bluetoothPermissionLauncher.launch(
@@ -480,9 +518,8 @@ class NearbyDevicesActivity : ComponentActivity() {
 
         bluetoothDisabled = false
 
-        BleConnectionManager.start(this, temporaryNodeId)
-
-        startAdvertising()
+        // Starts the GATT server and advertising for the whole app, not just this screen.
+        MessagingCoordinator.start(this)
 
         if (scanningRequested) {
 
@@ -513,92 +550,6 @@ class NearbyDevicesActivity : ComponentActivity() {
         enableBluetoothLauncher.launch(
             Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
         )
-    }
-
-
-    // =========================================================
-    // ADVERTISING
-    // =========================================================
-
-    private fun startAdvertising(
-        connectable: Boolean = true
-    ) {
-
-        if (isAdvertising || !hasBluetoothPermissions()) {
-
-            return
-        }
-
-        bluetoothLeAdvertiser =
-            bluetoothAdapter?.bluetoothLeAdvertiser
-
-        val advertiser =
-            bluetoothLeAdvertiser
-                ?: run {
-
-                    statusMessage =
-                        "This phone cannot advertise over BLE."
-
-                    return
-                }
-
-        val settings =
-            AdvertiseSettings.Builder()
-                .setAdvertiseMode(
-                    AdvertiseSettings.ADVERTISE_MODE_LOW_POWER
-                )
-                .setTxPowerLevel(
-                    AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM
-                )
-                .setConnectable(connectable)
-                .build()
-
-        val data =
-            AdvertiseData.Builder()
-                .addServiceData(
-                    DISASTER_CONNECT_SERVICE_UUID,
-                    byteArrayOf(PROTOCOL_VERSION) + temporaryNodeBytes
-                )
-                .setIncludeDeviceName(false)
-                .setIncludeTxPowerLevel(false)
-                .build()
-
-        try {
-
-            advertiser.startAdvertising(
-                settings,
-                data,
-                advertiseCallback
-            )
-
-        } catch (exception: SecurityException) {
-
-            statusMessage =
-                "Bluetooth permission was removed. Please allow it and retry."
-        }
-    }
-
-    private fun stopAdvertising() {
-
-        if (!isAdvertising || !hasBluetoothPermissions()) {
-
-            isAdvertising = false
-
-            return
-        }
-
-        try {
-
-            bluetoothLeAdvertiser?.stopAdvertising(
-                advertiseCallback
-            )
-
-        } catch (_: SecurityException) {
-
-            // Permission was removed while the activity was stopping.
-        }
-
-        isAdvertising = false
     }
 
 
@@ -957,10 +908,22 @@ class NearbyDevicesActivity : ComponentActivity() {
             device = node.device
         )
 
-        connectionMessage?.let { message ->
+        // null means the manager accepted and is now CONNECTING; otherwise it explains why not.
+        connectNotice =
+            connectionMessage?.let { message ->
+                node.temporaryId to message
+            }
+    }
 
-            connectionStatus = message
-        }
+
+    private fun openAppSettings() {
+
+        startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", packageName, null)
+            )
+        )
     }
 
     private fun updateConnection(
@@ -1220,293 +1183,966 @@ enum class NodeConnectionState {
 // =========================================================
 // COMPOSE SCREEN
 // =========================================================
+// Every status shown here comes from NearbyNetworkRepository (scanning),
+// BleAdvertiser (visibility) and BleConnectionManager (connections).
+
+/** Bluetooth readiness as checked by prepareDiscovery(). */
+enum class BluetoothReadiness {
+    READY,
+    UNSUPPORTED,
+    PERMISSION_NEEDED,
+    OFF
+}
 
 @Composable
 fun NearbyDevicesScreen(
-    temporaryNodeId: String,
-    statusMessage: String,
+
+    localNodeId: String,
+
+    bluetooth: BluetoothReadiness,
+
     isScanning: Boolean,
+
     isAdvertising: Boolean,
-    bluetoothUnavailable: Boolean,
-    bluetoothDisabled: Boolean,
-    connectedNodeId: String?,
-    connectionStatus: String,
-    handshakeSuccessful: Boolean,
-    discoveryClockMillis: Long,
+
+    advertisingProblem: String?,
+
     nodes: List<NearbyNode>,
-    onToggleScanning: () -> Unit,
+
+    connections: Map<String, ManagedConnection>,
+
+    outgoingLinkNodeId: String?,
+
+    connectNotice: Pair<String, String>?,
+
+    onStartScanning: () -> Unit,
+
+    onStopScanning: () -> Unit,
+
+    onRequestPermission: () -> Unit,
+
+    onOpenSettings: () -> Unit,
+
     onEnableBluetooth: () -> Unit,
+
     onConnect: (NearbyNode) -> Unit,
-    onBack: () -> Unit
+
+    onDisconnect: (NearbyNode) -> Unit,
+
+    onMessage: (NearbyNode) -> Unit,
+
+    onBack: () -> Unit,
+
+    keyTrust: (String) -> KeyTrustStatus? = { null },
+
+    onVerify: (NearbyNode) -> Unit = {}
 ) {
 
-    Column(
+    // ---------------------------------------------------------
+    // Success animation events (one per observed, completed handshake)
+    // ---------------------------------------------------------
+
+    val tracker = remember { ConnectionSuccessTracker() }
+
+    val successEvents = remember { mutableStateMapOf<String, Long>() }
+
+    LaunchedEffect(connections) {
+
+        tracker.onConnections(connections).forEach { nodeId ->
+            successEvents[nodeId] = System.nanoTime()
+        }
+    }
+
+    // Keeps "last seen" labels current; the scanner itself is not touched.
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(Unit) {
+
+        while (true) {
+            delay(1_000L)
+            now = System.currentTimeMillis()
+        }
+    }
+
+    val reduceMotion = rememberReduceMotion()
+
+    LazyColumn(
         modifier =
             Modifier
                 .fillMaxSize()
-                .padding(20.dp)
+                .safeDrawingPadding(),
+        contentPadding =
+            PaddingValues(
+                horizontal = Spacing.screen,
+                vertical = Spacing.lg
+            ),
+        verticalArrangement = Arrangement.spacedBy(Spacing.lg)
     ) {
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        // =====================================================
+        // HEADER
+        // =====================================================
+
+        item {
+
+            ScreenHeader(
+                title = "Nearby Devices",
+                subtitle = "Connect with nearby devices to exchange emergency messages.",
+                onBack = onBack
+            )
+        }
+
+
+        // =====================================================
+        // YOUR DEVICE
+        // =====================================================
+
+        item {
+
+            YourDeviceCard(
+                localNodeId = localNodeId,
+                bluetooth = bluetooth,
+                isAdvertising = isAdvertising,
+                advertisingProblem = advertisingProblem
+            )
+        }
+
+
+        // =====================================================
+        // DISCOVERY CONTROLS
+        // =====================================================
+
+        item {
+
+            DiscoverySection(
+                bluetooth = bluetooth,
+                isScanning = isScanning,
+                reduceMotion = reduceMotion,
+                onStartScanning = onStartScanning,
+                onStopScanning = onStopScanning,
+                onRequestPermission = onRequestPermission,
+                onOpenSettings = onOpenSettings,
+                onEnableBluetooth = onEnableBluetooth
+            )
+        }
+
+
+        // =====================================================
+        // DEVICE LIST
+        // =====================================================
+
+        item {
 
             Text(
-                text = "NEARBY DEVICES",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
+                text = "Devices found (${nodes.size})",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.semantics { heading() }
             )
-
-            TextButton(onClick = onBack) {
-
-                Text("BACK")
-            }
         }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-        ) {
-
-            Column(modifier = Modifier.padding(16.dp)) {
-
-                Text(
-                    text = "YOUR TEMPORARY NODE ID",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Text(
-                    text = temporaryNodeId,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Text(
-                    text =
-                        "Advertising: " +
-                                if (isAdvertising) "ON" else "OFF",
-                    color =
-                        if (isAdvertising) Color(0xFF2E7D32) else Color.Red
-                )
-
-                Text(
-                    text = statusMessage,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (bluetoothUnavailable) {
-
-            BluetoothUnavailableContent()
-
-        } else if (bluetoothDisabled) {
-
-            Button(
-                onClick = onEnableBluetooth,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-
-                Text("TURN ON BLUETOOTH")
-            }
-
-        } else {
-
-            Button(
-                onClick = onToggleScanning,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-
-                Text(
-                    if (isScanning)
-                        "STOP SCANNING"
-                    else
-                        "START SCANNING"
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-        ) {
-
-            Column(modifier = Modifier.padding(14.dp)) {
-
-                Text(
-                    text = "GATT CONNECTION",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                Text(
-                    text = connectionStatus,
-                    color = if (handshakeSuccessful) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                if (connectedNodeId != null) {
-
-                    Text(text = "Node: $connectedNodeId")
-
-                    if (handshakeSuccessful) {
-
-                        Text(
-                            text = "Handshake: SUCCESS",
-                            color = Color(0xFF2E7D32),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Text(
-            text = "DISCOVERED NODES (${nodes.size})",
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
 
         if (nodes.isEmpty()) {
 
-            Text(
-                text =
-                    "No DisasterConnect nodes found yet. Keep another " +
-                            "phone nearby with this screen open.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-        } else {
-
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-
-                items(
-                    items = nodes,
-                    key = { it.temporaryId }
-                ) { node ->
-
-                    NearbyNodeCard(
-                        node = node,
-                        now = discoveryClockMillis,
-                        onConnect = { onConnect(node) }
-                    )
-                }
-            }
-        }
-    }
-}
-
-
-@Composable
-private fun BluetoothUnavailableContent() {
-
-    Text(
-        text =
-            "This device does not support Bluetooth Low Energy, so nearby " +
-                    "DisasterConnect discovery cannot run here.",
-        color = Color.Red
-    )
-}
-
-
-@Composable
-private fun NearbyNodeCard(
-    node: NearbyNode,
-    now: Long,
-    onConnect: () -> Unit
-) {
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(
-                enabled =
-                    node.connectionState != NodeConnectionState.CONNECTED &&
-                            node.connectionState != NodeConnectionState.CONNECTING,
-                onClick = onConnect
-            ),
-        shape = RoundedCornerShape(14.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-
-        Column(modifier = Modifier.padding(16.dp)) {
-
-            Text(
-                text = "DISASTERCONNECT NODE",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Text(
-                text = "Temporary ID: ${node.temporaryId}",
-                fontWeight = FontWeight.Bold
-            )
-
-            node.deviceName?.let { name ->
+            item {
 
                 Text(
-                    text = "Device: $name",
+                    text =
+                        when {
+                            bluetooth != BluetoothReadiness.READY ->
+                                "Devices will appear here once Bluetooth is ready."
+                            isScanning ->
+                                "Looking for devices… This can take up to a minute."
+                            else ->
+                                "No nearby devices found. Keep Bluetooth enabled and try scanning again."
+                        },
+                    style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
 
-            Text(
-                text = "RSSI: ${node.rssi} dBm (${node.rssi.signalStrengthLabel()})",
-                color = node.rssi.signalStrengthColor()
-            )
+        items(
+            items = nodes,
+            key = { it.temporaryId }
+        ) { node ->
 
-            Text(
-                text = "Status: ${node.connectionState.displayLabel()}",
-                color = node.connectionState.displayColor()
-            )
+            val connection = connections[node.temporaryId]
 
-            Text(
-                text = "Last seen: ${node.lastSeenAt.lastSeenLabel(now)}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            val status =
+                deviceStatus(
+                    connection = connection,
+                    visible = node.connectionState != NodeConnectionState.LOST
+                )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            val successEvent = successEvents[node.temporaryId]
 
-            Text(
-                text = when {
-                    node.connectionState == NodeConnectionState.CONNECTED ->
-                        "CONNECTED • Handshake: SUCCESS"
-                    node.connectionState == NodeConnectionState.CONNECTING -> "CONNECTING…"
-                    node.connectionState == NodeConnectionState.LOST -> "NODE NOT CURRENTLY VISIBLE"
-                    else -> "TAP TO CONNECT"
-                },
-                color =
-                    if (node.connectionState == NodeConnectionState.CONNECTED)
-                        Color(0xFF2E7D32)
-                    else MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold
+            // Drop the celebration as soon as it no longer matches reality.
+            if (successEvent != null && status != DeviceStatus.CONNECTED) {
+
+                SideEffect { successEvents.remove(node.temporaryId) }
+            }
+
+            NearbyDeviceCard(
+                node = node,
+                status = status,
+                connection = connection,
+                now = now,
+                successEvent = successEvent?.takeIf { status == DeviceStatus.CONNECTED },
+                onSuccessShown = { successEvents.remove(node.temporaryId, successEvent) },
+                canDisconnect = outgoingLinkNodeId == node.temporaryId,
+                // A refused connect attempt is stale once the device is connected (e.g. it connected to this phone).
+                notice = connectNotice?.takeIf { it.first == node.temporaryId && status != DeviceStatus.CONNECTED }?.second,
+                reduceMotion = reduceMotion,
+                onConnect = { onConnect(node) },
+                onDisconnect = { onDisconnect(node) },
+                onMessage = { onMessage(node) },
+                keyTrust = keyTrust(node.temporaryId),
+                onVerify = { onVerify(node) }
             )
         }
     }
+}
+
+
+// =========================================================
+// YOUR DEVICE
+// =========================================================
+
+@Composable
+private fun YourDeviceCard(
+
+    localNodeId: String,
+
+    bluetooth: BluetoothReadiness,
+
+    isAdvertising: Boolean,
+
+    advertisingProblem: String?
+) {
+
+    DisasterCard {
+
+        Text(
+            text = "Your Device",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Text(
+            text = localNodeId,
+            style = MaterialTheme.typography.headlineSmall,
+            modifier = Modifier.semantics { contentDescription = "Your device ID $localNodeId" }
+        )
+
+        Text(
+            text = "Nearby phones see this ID.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(Spacing.md))
+
+        LabelledStatus(label = "Bluetooth") {
+
+            when (bluetooth) {
+                BluetoothReadiness.READY -> StatusBadge(StatusType.CONNECTED, label = "On")
+                BluetoothReadiness.OFF -> StatusBadge(StatusType.DISCONNECTED, label = "Off")
+                BluetoothReadiness.PERMISSION_NEEDED -> StatusBadge(StatusType.WARNING, label = "Permission needed")
+                BluetoothReadiness.UNSUPPORTED -> StatusBadge(StatusType.WARNING, label = "Not supported")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(Spacing.sm))
+
+        LabelledStatus(label = "Visible to others") {
+
+            when {
+                isAdvertising -> StatusBadge(StatusType.CONNECTED, label = "Yes")
+                advertisingProblem != null -> StatusBadge(StatusType.WARNING, label = "No")
+                else -> StatusBadge(StatusType.DISCONNECTED, label = "Not yet")
+            }
+        }
+
+        if (!isAdvertising && advertisingProblem != null) {
+
+            Spacer(modifier = Modifier.height(Spacing.xs))
+
+            Text(
+                text = advertisingProblem,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+
+@Composable
+private fun LabelledStatus(
+
+    label: String,
+
+    badge: @Composable () -> Unit
+) {
+
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .semantics(mergeDescendants = true) {},
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.weight(1f)
+        )
+
+        Spacer(modifier = Modifier.width(Spacing.sm))
+
+        badge()
+    }
+}
+
+
+// =========================================================
+// DISCOVERY CONTROLS
+// =========================================================
+
+@Composable
+private fun DiscoverySection(
+
+    bluetooth: BluetoothReadiness,
+
+    isScanning: Boolean,
+
+    reduceMotion: Boolean,
+
+    onStartScanning: () -> Unit,
+
+    onStopScanning: () -> Unit,
+
+    onRequestPermission: () -> Unit,
+
+    onOpenSettings: () -> Unit,
+
+    onEnableBluetooth: () -> Unit
+) {
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
+    ) {
+
+        when (bluetooth) {
+
+            BluetoothReadiness.UNSUPPORTED ->
+                NoticeCard(
+                    title = "Bluetooth is not supported",
+                    message =
+                        "This phone cannot use Bluetooth Low Energy, so it cannot find " +
+                                "nearby devices. Messages you write are kept on this phone.",
+                    tone = CardTone.WARNING
+                )
+
+            BluetoothReadiness.PERMISSION_NEEDED -> {
+
+                NoticeCard(
+                    title = "Permission needed",
+                    message =
+                        "Allow the Nearby devices permission so DisasterConnect can find phones " +
+                                "around you. Until then, messages wait on this phone.",
+                    tone = CardTone.WARNING
+                )
+
+                PrimaryButton(
+                    text = "Allow permission",
+                    onClick = onRequestPermission,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                SecondaryButton(
+                    text = "Open settings",
+                    onClick = onOpenSettings,
+                    icon = Icons.Filled.Settings,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            BluetoothReadiness.OFF -> {
+
+                NoticeCard(
+                    title = "Bluetooth is off",
+                    message = "Turn on Bluetooth to find nearby devices and send messages.",
+                    tone = CardTone.WARNING
+                )
+
+                PrimaryButton(
+                    text = "Turn on Bluetooth",
+                    onClick = onEnableBluetooth,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            BluetoothReadiness.READY ->
+                if (isScanning) {
+
+                    Row(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .semantics(mergeDescendants = true) {
+                                    liveRegion = LiveRegionMode.Polite
+                                },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+
+                        ActivityIndicator(
+                            reduceMotion = reduceMotion,
+                            description = "Scanning"
+                        )
+
+                        Spacer(modifier = Modifier.width(Spacing.md))
+
+                        Text(
+                            text = "Scanning for nearby devices…",
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    SecondaryButton(
+                        text = "Stop scanning",
+                        onClick = onStopScanning,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                } else {
+
+                    Text(
+                        text = "Scanning is off.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    PrimaryButton(
+                        text = "Scan for Devices",
+                        onClick = onStartScanning,
+                        icon = Icons.Filled.Refresh,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+        }
+    }
+}
+
+
+// =========================================================
+// DEVICE CARD
+// =========================================================
+
+@Composable
+private fun NearbyDeviceCard(
+
+    node: NearbyNode,
+
+    status: DeviceStatus,
+
+    connection: ManagedConnection?,
+
+    now: Long,
+
+    successEvent: Long?,
+
+    onSuccessShown: () -> Unit,
+
+    canDisconnect: Boolean,
+
+    notice: String?,
+
+    reduceMotion: Boolean,
+
+    onConnect: () -> Unit,
+
+    onDisconnect: () -> Unit,
+
+    onMessage: () -> Unit,
+
+    keyTrust: KeyTrustStatus?,
+
+    onVerify: () -> Unit
+) {
+
+    DisasterCard {
+
+        // ---------------------------------------------------------
+        // Identity and status
+        // ---------------------------------------------------------
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+
+                Text(
+                    text = node.temporaryId,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                node.deviceName?.let { name ->
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(Spacing.sm))
+
+            StatusBadge(
+                status = status.badgeType(),
+                label = status.badgeLabel()
+            )
+        }
+
+        Spacer(modifier = Modifier.height(Spacing.xs))
+
+        Text(
+            text =
+                "Signal: ${node.rssi.signalStrengthLabel()} • Seen ${node.lastSeenAt.lastSeenLabel(now).lowercase()}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        if (status == DeviceStatus.OUT_OF_RANGE) {
+
+            Text(
+                text = "Not seen recently. It may be out of range.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+
+        // ---------------------------------------------------------
+        // Live connection feedback
+        // ---------------------------------------------------------
+
+        ConnectionFeedback(
+            nodeId = node.temporaryId,
+            status = status,
+            detail = connection?.detail,
+            successEvent = successEvent,
+            onSuccessShown = onSuccessShown,
+            reduceMotion = reduceMotion
+        )
+
+        notice?.let {
+
+            Spacer(modifier = Modifier.height(Spacing.sm))
+
+            StatusBadge(
+                status = StatusType.WARNING,
+                label = it
+            )
+        }
+
+        Spacer(modifier = Modifier.height(Spacing.md))
+
+
+        // ---------------------------------------------------------
+        // Actions
+        // ---------------------------------------------------------
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm)
+        ) {
+
+            when (status) {
+
+                DeviceStatus.AVAILABLE,
+                DeviceStatus.OUT_OF_RANGE ->
+                    PrimaryButton(
+                        text = "Connect",
+                        onClick = onConnect,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                DeviceStatus.FAILED ->
+                    PrimaryButton(
+                        text = "Try again",
+                        onClick = onConnect,
+                        icon = Icons.Filled.Refresh,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                DeviceStatus.DISCONNECTED ->
+                    PrimaryButton(
+                        text = "Reconnect",
+                        onClick = onConnect,
+                        icon = Icons.Filled.Refresh,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                // Disabled while the manager is working, so repeated taps cannot start a second attempt.
+                DeviceStatus.CONNECTING ->
+                    PrimaryButton(
+                        text = "Connecting…",
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                DeviceStatus.DISCONNECTING ->
+                    PrimaryButton(
+                        text = "Disconnecting…",
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                DeviceStatus.CONNECTED ->
+                    if (canDisconnect) {
+                        SecondaryButton(
+                            text = "Disconnect",
+                            onClick = onDisconnect,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+            }
+
+            // Messages are stored and sent when a link exists, so this is always available.
+            if (status == DeviceStatus.CONNECTED) {
+                PrimaryButton(
+                    text = "Message",
+                    onClick = onMessage,
+                    icon = Icons.Filled.Email,
+                    modifier = Modifier.weight(1f)
+                )
+            } else {
+                SecondaryButton(
+                    text = "Message",
+                    onClick = onMessage,
+                    icon = Icons.Filled.Email,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        if (status != DeviceStatus.CONNECTED) {
+
+            Spacer(modifier = Modifier.height(Spacing.xs))
+
+            Text(
+                text = "Messages wait on this phone and send once you are connected.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+
+        // ---------------------------------------------------------
+        // Contact verification (personal messages only)
+        // ---------------------------------------------------------
+
+        keyTrust?.let { trust ->
+
+            Spacer(modifier = Modifier.height(Spacing.sm))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+
+                StatusBadge(
+                    status = trust.badgeType(),
+                    label = trust.label
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                TertiaryButton(
+                    text = if (trust == KeyTrustStatus.VERIFIED) "Safety code" else "Verify",
+                    onClick = onVerify,
+                    icon = Icons.Filled.Lock
+                )
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun ConnectionFeedback(
+
+    nodeId: String,
+
+    status: DeviceStatus,
+
+    detail: String?,
+
+    successEvent: Long?,
+
+    onSuccessShown: () -> Unit,
+
+    reduceMotion: Boolean
+) {
+
+    // Status text is announced by TalkBack when it changes.
+    val liveModifier =
+        Modifier
+            .fillMaxWidth()
+            .padding(top = Spacing.md)
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }
+
+    when {
+
+        status == DeviceStatus.CONNECTING ->
+            Row(
+                modifier = liveModifier,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+
+                ActivityIndicator(
+                    reduceMotion = reduceMotion,
+                    description = "Connecting to $nodeId"
+                )
+
+                Spacer(modifier = Modifier.width(Spacing.md))
+
+                Column(modifier = Modifier.weight(1f)) {
+
+                    Text(
+                        text = "Connecting to device…",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+
+                    Text(
+                        text = detail?.takeIf { it.isNotBlank() } ?: nodeId,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+        successEvent != null ->
+            SuccessBanner(
+                nodeId = nodeId,
+                event = successEvent,
+                onShown = onSuccessShown,
+                reduceMotion = reduceMotion,
+                modifier = liveModifier
+            )
+
+        status == DeviceStatus.FAILED ->
+            FeedbackRow(
+                icon = Icons.Outlined.Warning,
+                title = "Connection failed. Try again.",
+                detail = detail,
+                modifier = liveModifier
+            )
+
+        status == DeviceStatus.DISCONNECTED ->
+            FeedbackRow(
+                icon = Icons.Outlined.Close,
+                title = "Disconnected",
+                detail = "The connection to $nodeId ended.",
+                modifier = liveModifier
+            )
+
+        status == DeviceStatus.DISCONNECTING ->
+            FeedbackRow(
+                icon = Icons.Outlined.Close,
+                title = "Disconnecting…",
+                detail = null,
+                modifier = liveModifier
+            )
+    }
+}
+
+
+/** Checkmark that scales and fades in after a confirmed handshake, then gives way to the normal card. */
+@Composable
+private fun SuccessBanner(
+
+    nodeId: String,
+
+    event: Long,
+
+    onShown: () -> Unit,
+
+    reduceMotion: Boolean,
+
+    modifier: Modifier = Modifier
+) {
+
+    val visible = remember(event) { MutableTransitionState(reduceMotion) }
+
+    LaunchedEffect(event) {
+
+        visible.targetState = true
+
+        delay(SUCCESS_VISIBLE_MILLIS)
+
+        onShown()
+    }
+
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.medium,
+        color = DisasterTheme.colors.info,
+        contentColor = DisasterTheme.colors.onInfo
+    ) {
+
+        Row(
+            modifier = Modifier.padding(Spacing.md),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+
+            AnimatedVisibility(
+                visibleState = visible,
+                enter =
+                    if (reduceMotion) EnterTransition.None
+                    else fadeIn(tween(250)) + scaleIn(tween(250), initialScale = 0.6f)
+            ) {
+
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = "Connected",
+                    modifier = Modifier.size(Sizes.icon + Spacing.sm)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(Spacing.md))
+
+            Column {
+
+                Text(
+                    text = "Successfully connected!",
+                    style = MaterialTheme.typography.titleSmall
+                )
+
+                Text(
+                    text = "Connected to $nodeId",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun FeedbackRow(
+
+    icon: ImageVector,
+
+    title: String,
+
+    detail: String?,
+
+    modifier: Modifier = Modifier
+) {
+
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(Sizes.icon)
+        )
+
+        Spacer(modifier = Modifier.width(Spacing.md))
+
+        Column(modifier = Modifier.weight(1f)) {
+
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall
+            )
+
+            detail?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+
+/** Small spinner; a still icon when the user has turned animations off. */
+@Composable
+private fun ActivityIndicator(
+
+    reduceMotion: Boolean,
+
+    description: String
+) {
+
+    val modifier =
+        Modifier
+            .size(Sizes.icon)
+            .semantics { contentDescription = description }
+
+    if (reduceMotion) {
+
+        Icon(
+            imageVector = Icons.Filled.Refresh,
+            contentDescription = null,
+            modifier = modifier
+        )
+
+    } else {
+
+        CircularProgressIndicator(
+            modifier = modifier,
+            strokeWidth = 3.dp,
+            color = MaterialTheme.colorScheme.primary
+        )
+    }
+}
+
+
+/** True when the system animator duration scale is 0 (animations turned off). */
+@Composable
+private fun rememberReduceMotion(): Boolean {
+
+    val resolver = LocalContext.current.contentResolver
+
+    return remember {
+        Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+    }
+}
+
+private const val SUCCESS_VISIBLE_MILLIS = 2_500L
+
+private fun DeviceStatus.badgeType(): StatusType = when (this) {
+    DeviceStatus.CONNECTED -> StatusType.CONNECTED
+    DeviceStatus.CONNECTING, DeviceStatus.DISCONNECTING -> StatusType.PENDING
+    DeviceStatus.FAILED -> StatusType.WARNING
+    DeviceStatus.AVAILABLE, DeviceStatus.OUT_OF_RANGE, DeviceStatus.DISCONNECTED -> StatusType.DISCONNECTED
+}
+
+private fun DeviceStatus.badgeLabel(): String = when (this) {
+    DeviceStatus.AVAILABLE -> "Not connected"
+    DeviceStatus.OUT_OF_RANGE -> "Out of range"
+    DeviceStatus.CONNECTING -> "Connecting"
+    DeviceStatus.CONNECTED -> "Connected"
+    DeviceStatus.DISCONNECTING -> "Disconnecting"
+    DeviceStatus.FAILED -> "Failed"
+    DeviceStatus.DISCONNECTED -> "Disconnected"
 }
 
 
@@ -1528,35 +2164,6 @@ private fun Int.signalStrengthLabel(): String {
         this >= -60 -> "Strong"
         this >= -75 -> "Medium"
         else -> "Weak"
-    }
-}
-
-private fun Int.signalStrengthColor(): Color {
-
-    return when {
-        this >= -60 -> Color(0xFF2E7D32)
-        this >= -75 -> Color(0xFFF57C00)
-        else -> Color.Red
-    }
-}
-
-private fun NodeConnectionState.displayLabel(): String {
-
-    return when (this) {
-        NodeConnectionState.NEARBY -> "NEARBY"
-        NodeConnectionState.CONNECTING -> "CONNECTING"
-        NodeConnectionState.CONNECTED -> "CONNECTED"
-        NodeConnectionState.LOST -> "NOT CURRENTLY VISIBLE"
-    }
-}
-
-private fun NodeConnectionState.displayColor(): Color {
-
-    return when (this) {
-        NodeConnectionState.CONNECTED -> Color(0xFF2E7D32)
-        NodeConnectionState.CONNECTING -> Color(0xFFF57C00)
-        NodeConnectionState.LOST -> Color.Red
-        NodeConnectionState.NEARBY -> Color(0xFF2E7D32)
     }
 }
 

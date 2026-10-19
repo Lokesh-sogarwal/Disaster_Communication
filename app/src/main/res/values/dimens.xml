@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- DisasterConnect design system (mirrors ui/theme/Dimens.kt) for View-based screens. -->
+
+    <!-- Spacing: 4dp grid -->
+    <dimen name="dc_space_xs">4dp</dimen>
+    <dimen name="dc_space_sm">8dp</dimen>
+    <dimen name="dc_space_md">12dp</dimen>
+    <dimen name="dc_space_lg">16dp</dimen>
+    <dimen name="dc_space_xl">24dp</dimen>
+    <dimen name="dc_space_xxl">32dp</dimen>
+    <dimen name="dc_space_screen">20dp</dimen>
+
+    <!-- Sizes -->
+    <dimen name="dc_touch_target">48dp</dimen>
+    <dimen name="dc_list_item_min_height">56dp</dimen>
+    <dimen name="dc_emergency_button_min_height">64dp</dimen>
+
+    <!-- Corner radii -->
+    <dimen name="dc_radius_small">8dp</dimen>
+    <dimen name="dc_radius_medium">12dp</dimen>
+    <dimen name="dc_radius_large">16dp</dimen>
+
+    <!-- Text sizes (sp so system font scaling applies) -->
+    <dimen name="dc_text_body">16sp</dimen>
+    <dimen name="dc_text_label">14sp</dimen>
+    <dimen name="dc_text_title">20sp</dimen>
+</resources>

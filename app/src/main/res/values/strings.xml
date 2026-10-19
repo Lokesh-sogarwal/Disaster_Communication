@@ -1,3 +1,27 @@
 <resources>
     <string name="app_name">DisasterConnect</string>
+
+    <!-- Map & Shelters screen (MapActivity) -->
+    <string name="map_title">Map &amp; Shelters</string>
+    <string name="map_back">Back</string>
+    <string name="map_my_location">My Location</string>
+    <string name="map_nearby_shelters">Nearby Shelters</string>
+    <string name="map_retry">Retry</string>
+    <string name="map_show_on_map">Show on map</string>
+    <string name="map_your_location_marker">You are here</string>
+
+    <string name="map_chip_loading">Loading…</string>
+    <string name="map_chip_online">Online map</string>
+    <string name="map_chip_offline">No Internet</string>
+    <string name="map_chip_failed">Map error</string>
+
+    <string name="map_status_loading">Loading map…</string>
+    <string name="map_status_failed">The map couldn\'t load. Check your connection, then tap Retry.</string>
+    <string name="map_status_offline">No Internet. Offline maps are not downloaded in this app yet, so only areas you viewed before may appear.</string>
+    <string name="map_status_location_shown">The pin shows your location.</string>
+    <string name="map_status_location_permission">Location permission is off, so your position can\'t be shown. Allow location on the Home screen.</string>
+    <string name="map_status_location_unavailable">Your location isn\'t available. Go back and tap Refresh location on the Home screen.</string>
+
+    <string name="map_no_shelters">No shelter data is available yet, so shelters can\'t be shown. Follow instructions from local authorities.</string>
+    <string name="map_shelter_distance">About %1$s from you</string>
 </resources>

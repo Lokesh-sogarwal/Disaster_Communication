@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
+   Auto Backup rules for Android 11 (API 30) and lower.
    See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+   Android 12+ uses data_extraction_rules.xml instead.
+
+   Device identity is never backed up (rules.md §15): the node ID and the record of this
+   install's Keystore identity key. Keystore private keys are never backed up by Android.
+   Everything else keeps the default Auto Backup behaviour.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="sharedpref" path="disaster_connect_ble.xml" />
+    <exclude domain="sharedpref" path="disaster_connect_identity.xml" />
 </full-backup-content>

@@ -1,1 +1,24 @@
+# Build output
 /build
+/release
+/debug
+
+# Native build output
+.cxx/
+.externalNativeBuild/
+
+# Local configuration
+local.properties
+
+# Signing keys and build artifacts
+*.jks
+*.keystore
+*.apk
+*.aab
+*.ap_
+*.dex
+keystore.properties
+
+# Logs and crash reports
+*.log
+*.hprof

@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.DisasterConnect" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.DisasterConnect" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Shown before Compose draws; matches the design-system background. -->
+        <item name="android:windowBackground">@color/dc_off_white</item>
+        <item name="android:colorPrimary">@color/dc_charcoal</item>
+        <item name="android:colorAccent">@color/dc_charcoal</item>
+    </style>
 </resources>

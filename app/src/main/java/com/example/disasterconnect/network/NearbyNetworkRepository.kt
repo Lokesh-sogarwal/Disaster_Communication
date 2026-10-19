@@ -57,7 +57,9 @@ object NearbyNetworkRepository {
         try {
             resolvedScanner.startScan(
                 listOf(ScanFilter.Builder().setServiceData(serviceUuid, byteArrayOf(PROTOCOL_VERSION), byteArrayOf(0xFF.toByte())).build()),
-                ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER).setReportDelay(1_000L).build(),
+                // No hardware batching: on some phones (Samsung SM-M325F, Android 13) batched scans with this
+                // 128-bit service-data filter never returned a result. Results arrive one by one instead.
+                ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER).setReportDelay(0L).build(),
                 scanCallback
             )
             scanning = true

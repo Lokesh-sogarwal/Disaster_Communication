@@ -7,4 +7,15 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- DisasterConnect design system (mirrors ui/theme/Color.kt). Solid colours only. -->
+    <color name="dc_emergency_red">#FFBE1A1A</color>
+    <color name="dc_secondary_red">#FFD0311E</color>
+    <color name="dc_warning_gold">#FFF7D87F</color>
+    <color name="dc_soft_cream">#FFF8EBAB</color>
+    <color name="dc_off_white">#FFFFFBF5</color>
+    <color name="dc_ink">#FF1F1B16</color>
+    <color name="dc_charcoal">#FF33302E</color>
+    <color name="dc_muted_ink">#FF5C5550</color>
+    <color name="dc_outline">#FF7A716B</color>
 </resources>
